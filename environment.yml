@@ -5,7 +5,9 @@ channels:
 dependencies:
   - python=3.6
   - matplotlib=2.0.2
-  - numpy=1.13.1
+  - numpy=1.13.3
+  - pandas=0.20.3
   - scipy=0.19.1
-  - h5py=2.7.0
-  - nglview
+  - urllib3=1.22
+  - nglview=1.0
+  - biopandas
