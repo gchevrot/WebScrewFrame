@@ -1,7 +1,11 @@
 import nglview
+import numpy as np
+import pandas as pd
 from biopandas.pdb import PandasPdb
 from .read import read_pdbid
 from .data import aa_sidechain_chemical_properties as aa_hydrophobicity
+from .correlation import correlation
+from .plot import plot_msd
 
 class Pdb:
     """
@@ -17,6 +21,16 @@ class Pdb:
         # pandas pdb (biopandas)
         self.ppdb = PandasPdb().fetch_pdb(self.pdbid)
         self._coordinates = None
+        self._msd = None
+        # Checking the protein conformity based on the C-alpha Distances
+        print("Checking the molecule conformity ...")
+        dist_check = self.ca(chain_id_as_index=True).distances()>4
+        if dist_check.any():
+            print("WARNING")
+            print("It seems that some residues are missing within the protein.")
+            print("As a consequence, the ScrewFrame parameters won't be correct.")
+        else:
+            print("No missing residues within the protein were found.")
 
     def show(self):
         """return a 3D view of the protein within the notebook"""
@@ -55,6 +69,9 @@ class Pdb:
                             regex='coord$', axis='columns')
         return self
 
+    def chain_names(self):
+        return sorted(set(self.atoms()['chain_id']))
+
     def coordinates(self):
         """
         Return the coordinates defined by another method (e.g. the ca() method
@@ -62,18 +79,6 @@ class Pdb:
         Chained method to ca() method
         """
         return self._coordinates
-
-    def distances(self):
-        """
-        Distances between the successive atoms
-        Chained method to ca() method
-        """
-        # Distances between atoms within a same chain_id
-        if self._coordinates.index.name == 'chain_id':
-            return self._coordinates.groupby(by='chain_id').diff().dropna().pow(2).sum(axis='columns').pow(1/2)
-        # Distances between successive atoms
-        else:
-            return self._coordinates.diff().dropna().pow(2).sum(axis='columns').pow(1/2)
 
     def description(self):
         """
@@ -87,6 +92,20 @@ class Pdb:
         chain_names = [name for name in df.index]
         chain_lengths = [str(length) for length in df['x_coord']]
         print(f"""The molecule contains {n_chains} chains ({', '.join(chain_names)}) with {', '.join(chain_lengths)} residues respectively.""")
+
+    def distances(self):
+        """
+        Distances between the successive atoms
+        Chained method to ca() method
+        """
+        # Distances between atoms within a same chain_id
+        if self._coordinates.index.name == 'chain_id':
+            # See https://stackoverflow.com/questions/48888843/pandas-use-diff-with-groupby
+            # need to use reset_index to use diff with groupby
+            return self._coordinates.reset_index().groupby(by='chain_id').diff().set_index(self._coordinates.index).dropna().pow(2).sum(axis='columns').pow(1/2)
+        # Distances between successive atoms
+        else:
+            return self._coordinates.diff().dropna().pow(2).sum(axis='columns').pow(1/2)
 
     def hydrophobicity(self):
         """
@@ -102,3 +121,42 @@ class Pdb:
         # count the number of hydrophbic and hydrophilic residues
         residues = residues.map(aa_hydrophobicity).value_counts(dropna=True)
         return residues['hydrophobic'] / residues.sum() * 100, residues
+
+    def msd(self):
+        """
+        Compute mean-square displacement from the coordinates for each chain
+        """
+        # convert coordinates from Angstrom to nm
+        coordinates_nm = self._coordinates / 10
+        dsq = coordinates_nm.pow(2).sum(axis='columns')
+        cumsum_dsq = dsq.groupby(by='chain_id').cumsum()
+        rev_cumsum_dsq = dsq.iloc[::-1].groupby(by='chain_id').cumsum()
+        sumsq = cumsum_dsq.groupby(by='chain_id').last()
+        # Compute msd for each chain
+        msds = []
+        for chain_name in sumsq.index:
+            zero = pd.Series(0, index=[chain_name])
+            zero.index.name = 'chain_id'
+            n = len(cumsum_dsq[chain_name])
+            coordinates = coordinates_nm.loc[chain_name].values
+            msds.append((2*sumsq[chain_name]
+                        - zero.append(cumsum_dsq.groupby(by='chain_id').get_group(chain_name)[:-1])
+                        - zero.append(rev_cumsum_dsq.groupby(by='chain_id').get_group(chain_name)[:-1]))
+                        / np.arange(n, 0, -1)
+                        - 2.*correlation(coordinates, coordinates))
+        self._msd = msds
+        return self
+
+    def plot(self, percentage=1, legend=None):
+        """
+        plot msd
+        """
+        if not legend:
+            legend = self.chain_names()
+        plot_msd(self._msd, percentage=percentage, legend=legend)
+
+    def values(self):
+        """
+        values of the MSD for each chain
+        """
+        return self._msd
